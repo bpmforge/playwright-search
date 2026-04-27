@@ -1,0 +1,11 @@
+node_modules
+dist
+.profile
+profile
+debug-*.png
+debug-*.html
+*.log
+.DS_Store
+
+tests/debug-*.ts
+tests/timing-probe.ts

@@ -1,0 +1,40 @@
+{
+  "name": "playwright-search",
+  "version": "0.1.0",
+  "description": "Human-paced multi-engine search via Playwright (DDG, Brave, Bing, Google)",
+  "type": "module",
+  "bin": {
+    "playwright-search": "./dist/cli.js",
+    "playwright-search-mcp": "./dist/mcp.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "search": "tsx src/cli.ts",
+    "mcp": "tsx src/mcp.ts",
+    "mcp:start": "node dist/mcp.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@mozilla/readability": "^0.6.0",
+    "@types/jsdom": "^28.0.1",
+    "jsdom": "^29.1.0",
+    "playwright": "^1.49.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -6,9 +6,11 @@ The `playwright-search-mcp` binary exposes three tools over the standard MCP std
 
 | Tool | Inputs | Returns |
 |------|--------|---------|
-| `web_research` | `query`, `top` (1–20, default 5), `engines` (default `["ddg","brave","bing"]`), `max_chars_per_source` (500–12000, default 3000), `headless` (default true) | One formatted text block with `[Source N: title — site — url]` markers and extracted main content per source |
+| `web_research` | `query`, `top` (1–20, default 3), `engines` (default `["ddg","brave","bing"]`), `max_chars_per_source` (500–12000, default 3000), `relevance_query` (optional), `headless` (default true) | Formatted text with `[Source N: title — site — url]` markers; **paragraph-ranked by relevance**: returns the BEST paragraphs matching the query, not the first N chars |
 | `web_search` | `query`, `limit` (1–20, default 10), `engines`, `headless` | Numbered list of titles + URLs + snippets, deduped across engines |
-| `web_fetch` | `url`, `max_chars` (500–12000, default 8000), `no_cache` | Header (title/byline/site/url) + extracted main article text |
+| `web_fetch` | `url`, `max_chars` (500–12000, default 8000), `no_cache`, `relevance_query` (optional) | Header (title/byline/site/url) + extracted main article text. With `relevance_query`, returns the BEST paragraphs for that query. |
+
+**Architecture (as of v0.1):** HTTP-first. Search engines are queried via plain `fetch()` + jsdom parse first — no browser launch. Browser (Playwright headless Chromium) is only invoked as fallback when the HTTP path is blocked by something a browser would help with (and not, e.g., by a Proof-of-Work captcha that a browser can't solve either). A 3-source `web_research` call typically returns in ~15–25s on cold cache, near-instant on warm cache.
 
 ## Why these specific tools
 
@@ -102,14 +104,17 @@ The researcher agent prompts in both `bpm-opencode-experts/agents/researcher.md`
 
 ## Local-LLM tuning
 
-- **Token budget**: default `max_chars_per_source=3000` per source × 5 sources ≈ 15k tokens of context. Comfortable for a 45k budget. Drop to 1500 for tight budgets, raise to 6000 for premium-context models.
-- **Engine selection**: `["ddg","brave","bing"]` is the headless-stable default. Add `"google"` only when running headed (and accept it may be skipped on captcha).
+- **Token budget**: default `max_chars_per_source=3000` per source × 3 sources ≈ 9k tokens of context. Comfortable for a 45k budget. Drop to 1500 for tight budgets, raise to 6000 for premium-context models.
+- **Engine selection**: `["ddg","brave","bing"]` is the default. Brave may serve a Proof-of-Work captcha to repeated callers; the adapter detects this and skips the browser fallback (since browser hits the same challenge). Google is excluded by default — add it only if you're OK with frequent captcha aborts.
 - **Caching**: 24h disk cache at `~/.playwright-search/cache/` — repeat queries within a day are zero-cost. Pass `no_cache: true` on `web_fetch` if you need fresh.
+- **Per-engine timeout**: 20s. If an engine hangs, others continue.
+- **Progress notifications**: the server emits `notifications/progress` during long calls so MCP clients (opencode, Claude Code) can keep the request alive past their default request timeout.
 - **Response shape**: all tools return one `text` content block — no JSON-in-JSON, no nested structures. Friendlier for smaller models.
 
 ## Operational notes
 
 - Server runs over stdio; no network port to manage.
 - One MCP process per host (opencode/Claude Code spawns it on demand and pipes stdin/stdout).
-- The persistent Chromium profile at `~/.playwright-search/profile/` is shared across CLI and MCP runs — cookies and consent persist.
-- Per-domain rate limit (2–4s) and robots.txt respect are unconditional — no flag to disable in MCP mode (CLI has `--no-robots` for emergencies; MCP doesn't expose it on purpose).
+- Per-engine persistent Chromium profiles under `~/.playwright-search/profile/{ddg,brave,bing,google}/` so engines can run concurrently without serializing on a single profile dir lock. Cookies and consent persist per engine.
+- Per-domain page-fetch rate limit (1.2–2.5s) + robots.txt respect are unconditional — no flag to disable in MCP mode (CLI has `--no-robots` for emergencies; MCP doesn't expose it on purpose).
+- **All agents in a project see these tools.** Once `playwright-search` is in your `opencode.json` `mcp` block, every agent in that project can call `web_research` / `web_search` / `web_fetch` — not just a designated researcher agent. Whether each agent is *aware of* the tools depends on its system prompt; see `bpm-opencode-experts/agents/shared/RESEARCH_TOOLS.md` for the shared reference doc agents read at runtime.

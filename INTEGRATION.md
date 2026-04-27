@@ -76,11 +76,23 @@ For Jarvis/claude-experts (already npm-based) this is the cleanest path. Add to 
 
 (Or push to a Gitea repo and reference it via git URL.)
 
-## 3. HTTP API + MCP (planned step 3)
+## 3. MCP (built — see [MCP.md](./MCP.md))
 
-Sketch — not built yet, but the shape is locked:
+The `playwright-search-mcp` binary speaks the standard MCP stdio protocol. Three tools:
 
-**HTTP** (Fastify, port 4099):
+```
+tools:
+  - web_research(query, top?, engines?, max_chars_per_source?, relevance_query?)
+  - web_search(query, limit?, engines?)
+  - web_fetch(url, max_chars?, no_cache?, relevance_query?)
+```
+
+This is the path for opencode + Claude Code: register the MCP server in `opencode.json` or `.mcp.json`, every agent in the project gets the tools as native function calls — no subprocess plumbing. See `MCP.md` for setup commands and config snippets.
+
+## 4. HTTP API (not yet built)
+
+Sketch for projects that can't speak MCP:
+
 ```
 POST /search          {query, engines, top}                    → SearchResult[]
 POST /search-fetch    {query, engines, top, enrichTop}         → EnrichedResult[]
@@ -89,31 +101,17 @@ GET  /cache/:hash                                              → cached entry
 GET  /healthz
 ```
 
-**MCP** (stdio):
-```
-tools:
-  - web_search(query, engines?, top?)
-  - web_search_and_extract(query, top?)
-  - web_fetch(url)
-```
+Build only if you find a host that needs it.
 
-This is the path for opencode + Claude Code: register the MCP server, agents get `web_search_and_extract` as a native tool, no subprocess plumbing.
+## How each existing project consumes this
 
-## How each existing project would consume this
+### bpm-opencode-experts → all agents
+The MCP is registered in `examples/opencode.json`. Every agent in the project (researcher, coding-agent, security-auditor, api-designer, etc.) can call `web_research`, `web_search`, `web_fetch` — see `agents/shared/RESEARCH_TOOLS.md` for the shared reference doc agents read at runtime.
 
-### bpm-opencode-experts → researcher agent
-The researcher.md agent currently uses `task()` and times out. Two-step migration:
-
-1. **Today:** add a CLI invocation to the agent's prompt. When it needs web context, run:
-   ```bash
-   playwright-search "<query>" --enrich --enrich-top 5 --headless --json
-   ```
-   Pipe stdout to JSON, feed `extract.textContent` into the LLM. No timeout, deterministic output, cached.
-
-2. **Step 3 (MCP):** register `playwright-search-mcp` in opencode's MCP config. The researcher agent gets `web_search_and_extract` as a tool.
+The researcher agent uses these tools by default and runs an iterative loop (pass 1 broad → pass 2+ refined). Other agents reach for them on demand: e.g., security-auditor for CVE lookups, coding-agent before adopting a new library, api-designer for current REST/GraphQL standards.
 
 ### claude-experts → researcher agent
-Same as above. CLI today, MCP later.
+Native `WebSearch`/`WebFetch` remain the default in Claude Code. The MCP is optional — register it via `.mcp.json` or `~/.claude.json` if you want multi-engine, paragraph-ranked, cached research. The researcher agent's prompt documents the choice.
 
 ### Jarvis → research-director / chat agent
 Already Node. Use the **library** path:

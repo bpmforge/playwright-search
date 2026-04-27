@@ -1,20 +1,30 @@
 # playwright-search
 
-Human-paced multi-engine web search + page extraction via Playwright + Mozilla Readability. Free, polite, local.
+Multi-engine web search + page extraction. Free, polite, local. HTTP-first with Playwright fallback.
 
-- **Step 1**: query → top-N results (title, url, snippet) from DuckDuckGo, Brave, Bing, Google
-- **Step 2 (now)**: search → fetch each URL → extract main content (Readability) → cache → return enriched JSON
+- Query → top-N results from DuckDuckGo, Brave, Bing (Google opt-in)
+- Each result URL → Mozilla Readability extraction → 24h disk cache
+- Paragraph-level relevance ranking (BM25-lite) — returns the BEST paragraphs matching your query
+- Three CLI/library/MCP entry points
 
-For consuming this from Jarvis, claude-experts, bpm-opencode-experts, etc. see [`INTEGRATION.md`](./INTEGRATION.md).
+For consuming this from opencode, Claude Code, Jarvis, claude-experts, bpm-opencode-experts, etc. see [`INTEGRATION.md`](./INTEGRATION.md) and [`MCP.md`](./MCP.md).
 
-## Engine status (verified 2026-04-27)
+## Architecture
 
-| Engine  | Headless | Headed | Notes |
-|---------|----------|--------|-------|
-| DDG     | ✓        | ✓      | Tries `duckduckgo.com` first, falls back to `html.duckduckgo.com` via `context.request` (Node TLS) when the JS site blocks |
-| Brave   | ✓        | ✓      | Stable selectors, clean snippets |
-| Bing    | ✓        | ✓      | URLs are unwrapped from `bing.com/ck/a?u=a1<base64>` redirects |
-| Google  | captcha  | ✓ (likely) | Headless Chromium fingerprint trips Google's challenge. Run without `--headless` |
+**HTTP-first, browser as fallback.** Search engines are queried via plain `fetch()` + jsdom parse first — no Chromium boot. Browser is used only when the HTTP path is blocked by something a browser would actually help with (i.e., not a Proof-of-Work captcha that hits both equally).
+
+- ~15–25s for a 3-source `web_research` call on cold cache
+- Sub-second on warm cache
+- 7 fingerprint patches in `src/stealth.ts` for the browser fallback path
+
+## Engine status
+
+| Engine  | HTTP-first | Browser fallback | Notes |
+|---------|-----------|------------------|-------|
+| DDG     | ✓ via `html.duckduckgo.com` | ✓ | Most reliable — html endpoint is no-JS-friendly |
+| Bing    | ✓ via `bing.com/search?q=` | ✓ | URLs unwrapped from `bing.com/ck/a?u=a1<base64>` redirects |
+| Brave   | ⚠ POW captcha possible | skipped on POW | When Brave shows Proof-of-Work, browser hits same challenge — adapter fails fast instead of hanging |
+| Google  | ⚠ unusual-traffic page possible | only if HTTP fail isn't unrecoverable | Best to leave out unless you accept frequent aborts |
 
 ## Install
 

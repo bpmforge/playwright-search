@@ -6,6 +6,7 @@ import { searchAndFetch, type EnrichedResult } from "./pipeline.js";
 import { fetchAndExtract } from "./fetch/fetcher.js";
 import { searchAll } from "./index.js";
 import { rankByQuery } from "./extract/rank.js";
+import { pullmdSearch, pullmdReadUrl } from "./pullmd-serp.js";
 
 const DEFAULT_MAX_CHARS = 3000;
 const HARD_MAX_CHARS = 12000;
@@ -330,6 +331,157 @@ server.registerTool(
         .join("\n") + rankNote;
 
     return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
+  },
+);
+
+server.registerTool(
+  "web_search_pullmd",
+  {
+    title: "Web search via pullmd (SERP-only, no browser)",
+    description:
+      "Step 1 — always start here for any new topic. " +
+      "SERP-only, no browser (Playwright not launched). " +
+      "Queries DDG HTML, Mojeek, Brave, and Startpage in parallel via pullmd, " +
+      "deduplicates results, and ranks by engine-agreement. " +
+      "Returns titles, URLs, and snippets (~5-10s). " +
+      "Use before web_research_pullmd to triage which URLs are worth fetching.",
+    inputSchema: {
+      query: z.string().describe("The search query"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(30)
+        .default(10)
+        .describe("Total unique results to return (default 10)"),
+    },
+  },
+  async ({ query, limit }) => {
+    const results = await pullmdSearch(query, limit);
+    if (results.length === 0) {
+      return { content: [{ type: "text", text: "No results found." }] };
+    }
+    const lines: string[] = [];
+    results.forEach((r, i) => {
+      lines.push(`${i + 1}. ${r.title}`);
+      lines.push(`   ${r.url}  (${r.engines.join(", ")})`);
+      if (r.snippet) lines.push(`   ${r.snippet}`);
+      lines.push("");
+    });
+    return { content: [{ type: "text", text: lines.join("\n").trim() }] };
+  },
+);
+
+server.registerTool(
+  "web_research_pullmd",
+  {
+    title: "Web research via pullmd (SERP + full-page fetch + BM25)",
+    description:
+      "Step 2 — full content after web_search_pullmd has identified candidate URLs. " +
+      "SERP + full-page fetch via pullmd + BM25 paragraph ranking. " +
+      "Automatically falls back to Playwright (fetchAndExtract) for any URL where " +
+      "pullmd returns < 500 chars (JS-heavy SPAs, auth walls, Cloudflare). " +
+      "Each source annotated 'fetch: pullmd' or 'fetch: playwright fallback'. " +
+      "Escalate to web_research only if this returns < 2 useful sources.",
+    inputSchema: {
+      query: z.string().describe("The search query"),
+      top: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .default(3)
+        .describe("Number of top sources to fetch and extract (default 3)"),
+      max_chars_per_source: z
+        .number()
+        .int()
+        .min(500)
+        .max(HARD_MAX_CHARS)
+        .default(DEFAULT_MAX_CHARS)
+        .describe(
+          `Max characters of extracted text per source (default ${DEFAULT_MAX_CHARS})`,
+        ),
+      relevance_query: z
+        .string()
+        .optional()
+        .describe(
+          "Optional refined query for BM25 paragraph ranking. If omitted, uses the main query.",
+        ),
+    },
+  },
+  async ({ query, top, max_chars_per_source, relevance_query }) => {
+    const rankQuery = relevance_query || query;
+    const PULLMD_MIN_CHARS = 500;
+
+    const serpResults = await pullmdSearch(query, top * 3);
+    const candidates = serpResults.slice(0, top);
+
+    if (candidates.length === 0) {
+      return { content: [{ type: "text", text: "No results found." }] };
+    }
+
+    // Fetch all candidates via pullmd in parallel
+    const pullmdFetches = await Promise.allSettled(
+      candidates.map(async (r) => ({
+        result: r,
+        md: await pullmdReadUrl(r.url),
+      })),
+    );
+
+    // For any URL where pullmd returned thin content, retry with playwright
+    const playwrightRetries = await Promise.allSettled(
+      pullmdFetches.map(async (f) => {
+        if (f.status !== "fulfilled") return null;
+        if (f.value.md.length >= PULLMD_MIN_CHARS) return null;
+        const r = await fetchAndExtract(f.value.result.url, { useCache: true });
+        return { url: f.value.result.url, extract: r };
+      }),
+    );
+
+    const out: string[] = [];
+    let sourceNum = 0;
+    for (const [i, f] of pullmdFetches.entries()) {
+      if (f.status !== "fulfilled") continue;
+      const { result, md } = f.value;
+      sourceNum++;
+
+      // Prefer playwright content if pullmd was thin
+      const retry = playwrightRetries[i];
+      const playwrightText =
+        retry?.status === "fulfilled" &&
+        retry.value?.extract?.extract?.textContent
+          ? retry.value.extract.extract.textContent
+          : null;
+      const fetchNote = playwrightText
+        ? "playwright fallback"
+        : md.length >= PULLMD_MIN_CHARS
+          ? "pullmd"
+          : "snippet only";
+
+      out.push(
+        `[Source ${sourceNum}: ${result.title || "(untitled)"} — ${hostname(result.url)} — ${result.url}]`,
+      );
+      out.push(`engines: ${result.engines.join(", ")} | fetch: ${fetchNote}`);
+
+      const content =
+        playwrightText ?? (md.length >= PULLMD_MIN_CHARS ? md : null);
+      if (content) {
+        const ranked = rankByQuery(content, rankQuery, max_chars_per_source);
+        out.push(
+          `(top ${ranked.selectedCount} of ${ranked.totalParagraphs} paragraphs by relevance)`,
+        );
+        out.push(ranked.paragraphs.join("\n\n"));
+      } else if (result.snippet) {
+        out.push(`(snippet) ${result.snippet}`);
+      } else {
+        out.push("(no content fetched)");
+      }
+      out.push("");
+    }
+
+    return {
+      content: [{ type: "text", text: out.join("\n").trim() || "No results." }],
+    };
   },
 );
 

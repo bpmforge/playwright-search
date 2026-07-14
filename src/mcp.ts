@@ -6,13 +6,51 @@ import { searchAndFetch, type EnrichedResult } from "./pipeline.js";
 import { fetchAndExtract } from "./fetch/fetcher.js";
 import { searchAll } from "./index.js";
 import { rankByQuery } from "./extract/rank.js";
-import { pullmdSearch, pullmdReadUrl } from "./pullmd-serp.js";
+import { pullmdSearch, pullmdReadUrl, type SerpResult } from "./pullmd-serp.js";
 
 const DEFAULT_MAX_CHARS = 3000;
 const HARD_MAX_CHARS = 12000;
 
 const ENGINES = ["ddg", "brave", "bing", "google"] as const;
 type EngineId = (typeof ENGINES)[number];
+
+// SERP with graceful fallback. First try the fast no-browser path (pullmdSearch =
+// bpm-pull plain fetch of engine result pages). Many engines block plain fetch
+// (Cloudflare / JS-only) and return nothing — that was the external pullmd service's
+// job. So when the fast path is empty, fall back to the native Playwright multi-engine
+// search (searchAll), which drives a real browser. This is what lets us drop the
+// external pullmd dependency without losing SERP coverage. Content fetch keeps its own
+// pullmd->playwright fallback in the handlers below.
+async function serpWithFallback(
+  query: string,
+  limit: number,
+): Promise<SerpResult[]> {
+  const fast = await pullmdSearch(query, limit);
+  if (fast.length > 0) return fast;
+  const runs = await searchAll(query, { engines: [...ENGINES] as EngineId[] });
+  const merged = new Map<string, SerpResult>();
+  for (const run of runs) {
+    if (!run.ok) continue;
+    for (const r of run.results) {
+      const key = normalizeUrl(r.url);
+      const existing = merged.get(key);
+      if (existing) {
+        if (!existing.engines.includes(r.engine))
+          existing.engines.push(r.engine);
+        if (r.snippet.length > existing.snippet.length)
+          existing.snippet = r.snippet;
+      } else {
+        merged.set(key, {
+          title: r.title,
+          url: r.url,
+          snippet: r.snippet,
+          engines: [r.engine],
+        });
+      }
+    }
+  }
+  return [...merged.values()].slice(0, limit);
+}
 
 function formatEnrichedAsText(
   rows: EnrichedResult[],
@@ -337,13 +375,13 @@ server.registerTool(
 server.registerTool(
   "web_search_pullmd",
   {
-    title: "Web search via pullmd (SERP-only, no browser)",
+    title: "Web search (multi-engine SERP, fast path + browser fallback)",
     description:
       "Step 1 — always start here for any new topic. " +
-      "SERP-only, no browser (Playwright not launched). " +
-      "Queries DDG HTML, Mojeek, Brave, and Startpage in parallel via pullmd, " +
-      "deduplicates results, and ranks by engine-agreement. " +
-      "Returns titles, URLs, and snippets (~5-10s). " +
+      "Tries a fast no-browser fetch of DDG/Mojeek/Brave/Startpage result pages first (our own " +
+      "zero-dep pull, no external service); when an engine blocks plain fetch it falls back to " +
+      "the native Playwright multi-engine search automatically. " +
+      "Deduplicates and ranks by engine-agreement. Returns titles, URLs, and snippets. " +
       "Use before web_research_pullmd to triage which URLs are worth fetching.",
     inputSchema: {
       query: z.string().describe("The search query"),
@@ -357,7 +395,7 @@ server.registerTool(
     },
   },
   async ({ query, limit }) => {
-    const results = await pullmdSearch(query, limit);
+    const results = await serpWithFallback(query, limit);
     if (results.length === 0) {
       return { content: [{ type: "text", text: "No results found." }] };
     }
@@ -375,13 +413,13 @@ server.registerTool(
 server.registerTool(
   "web_research_pullmd",
   {
-    title: "Web research via pullmd (SERP + full-page fetch + BM25)",
+    title: "Web research (SERP + full-page fetch + BM25)",
     description:
       "Step 2 — full content after web_search_pullmd has identified candidate URLs. " +
-      "SERP + full-page fetch via pullmd + BM25 paragraph ranking. " +
-      "Automatically falls back to Playwright (fetchAndExtract) for any URL where " +
-      "pullmd returns < 500 chars (JS-heavy SPAs, auth walls, Cloudflare). " +
-      "Each source annotated 'fetch: pullmd' or 'fetch: playwright fallback'. " +
+      "SERP (fast fetch, browser fallback) + full-page fetch via our own zero-dep pull + BM25 " +
+      "paragraph ranking. Automatically falls back to Playwright (fetchAndExtract) for any URL " +
+      "where the fast pull returns < 500 chars (JS-heavy SPAs, auth walls, Cloudflare). " +
+      "Each source annotated 'fetch: pull' or 'fetch: playwright fallback'. " +
       "Escalate to web_research only if this returns < 2 useful sources.",
     inputSchema: {
       query: z.string().describe("The search query"),
@@ -413,14 +451,14 @@ server.registerTool(
     const rankQuery = relevance_query || query;
     const PULLMD_MIN_CHARS = 500;
 
-    const serpResults = await pullmdSearch(query, top * 3);
+    const serpResults = await serpWithFallback(query, top * 3);
     const candidates = serpResults.slice(0, top);
 
     if (candidates.length === 0) {
       return { content: [{ type: "text", text: "No results found." }] };
     }
 
-    // Fetch all candidates via pullmd in parallel
+    // Fetch all candidates via our own pull in parallel
     const pullmdFetches = await Promise.allSettled(
       candidates.map(async (r) => ({
         result: r,
@@ -445,7 +483,7 @@ server.registerTool(
       const { result, md } = f.value;
       sourceNum++;
 
-      // Prefer playwright content if pullmd was thin
+      // Prefer playwright content if the fast pull was thin
       const retry = playwrightRetries[i];
       const playwrightText =
         retry?.status === "fulfilled" &&
@@ -455,7 +493,7 @@ server.registerTool(
       const fetchNote = playwrightText
         ? "playwright fallback"
         : md.length >= PULLMD_MIN_CHARS
-          ? "pullmd"
+          ? "pull"
           : "snippet only";
 
       out.push(

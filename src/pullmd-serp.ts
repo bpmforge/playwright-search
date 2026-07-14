@@ -1,15 +1,23 @@
 /**
  * pullmd-serp.ts
  *
- * Fetches search-engine result pages via the pullmd MCP (localhost:33000)
- * and parses each engine's markdown output into normalised SerpResult objects.
+ * Fetches search-engine result pages via OUR OWN pull (bpm-pull.ts — zero-dep
+ * fetch -> strip -> extract -> markdown) and parses each engine's markdown output
+ * into normalised SerpResult objects. Formerly this proxied the external pullmd
+ * Docker service (AeternaLabsHQ, localhost:33000); that dependency is removed —
+ * pull() is self-contained, no external service required.
  *
- * Four engines, chosen because pullmd's extraction pipeline handles them cleanly:
+ * Four engines, chosen because plain-fetch + our extractor handle them cleanly:
  *   DDG HTML   – redirected URLs decoded from uddg= param
  *   Mojeek     – direct URLs, cleanest structure, independent index
  *   Brave      – web + Reddit community answers + Q&A boxes
  *   Startpage  – Google-quality results via Startpage proxy
+ *
+ * Cloudflare/JS-only engines can still return thin content to plain fetch; pullmdReadUrl()
+ * returns "" on failure so a blocked engine simply contributes no results (the other engines
+ * still do), and the content-fetch path in mcp.ts retries thin pages via the Playwright fetcher.
  */
+import { pull } from "./bpm-pull.js";
 
 export interface SerpResult {
   title: string;
@@ -18,40 +26,21 @@ export interface SerpResult {
   engines: string[];
 }
 
-// ── pullmd HTTP client ────────────────────────────────────────────────────
-
-const PULLMD_URL = process.env.PULLMD_URL ?? "http://localhost:33000/mcp";
-
-export async function pullmdReadUrl(url: string): Promise<string> {
-  const payload = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "tools/call",
-    params: { name: "read_url", arguments: { url } },
-  });
-
-  const res = await fetch(PULLMD_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-    },
-    body: payload,
-  });
-
-  if (!res.ok) throw new Error(`pullmd HTTP ${res.status}`);
-
-  const text = await res.text();
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("data:")) continue;
-    const d = JSON.parse(line.slice(5));
-    if (d?.result?.content) {
-      for (const c of d.result.content) {
-        if (c.type === "text") return c.text as string;
-      }
-    }
+// ── url -> markdown via our own pull (bpm-pull) ─────────────────────────────
+// Replaces the former external pullmd HTTP client. Returns "" on any failure so
+// callers degrade gracefully instead of throwing: a Cloudflare-blocked or JS-only
+// page yields "" here, and the content path in mcp.ts retries via the Playwright
+// fetcher. `raw` preserves every link (SERP result pages); the default extracts
+// main content (article fetch).
+export async function pullmdReadUrl(
+  url: string,
+  opts: { raw?: boolean } = {},
+): Promise<string> {
+  try {
+    return await pull(url, opts);
+  } catch {
+    return "";
   }
-  return "";
 }
 
 // ── text helpers ──────────────────────────────────────────────────────────
@@ -384,7 +373,8 @@ export async function pullmdSearch(
   // Parallel SERP fetches — all 4 engines at once
   const fetched = await Promise.allSettled(
     SEARCH_ENGINES.map(async (engine) => {
-      const md = await pullmdReadUrl(engine.url(query));
+      // raw: true — SERP result pages must keep every link for the parser
+      const md = await pullmdReadUrl(engine.url(query), { raw: true });
       return engine.parse(md);
     }),
   );

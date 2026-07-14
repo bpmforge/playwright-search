@@ -2,6 +2,10 @@
 
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-07-14
+
+Dropped the external **pullmd Docker service** dependency. `web_search_pullmd` / `web_research_pullmd` and all URL fetching now run on our **own zero-dep pull** (`src/bpm-pull.ts`, vendored from bpm-agent-amplifier's `bpm-pull.mjs`: fetch → strip → density-scored main-content extraction → HTML→markdown), no `localhost:33000` required. SERP result-page fetching tries the fast no-browser pull first and **falls back to the native Playwright multi-engine search** (`serpWithFallback`) when an engine blocks plain fetch (Cloudflare/JS); content fetching keeps its existing pull→Playwright fallback. Tool names unchanged for compatibility. `pullmd-serp.ts`'s external HTTP client removed. New `tests/bpm-pull.test.ts` (7 cases) covers the transform pipeline. Verified live with the external service down: content fetch works, SERP returns 30 results across DDG/Brave/Bing via fallback.
+
 ## [0.2.0] — 2026-05-04
 
 Tiered research architecture — two new pullmd-backed tools that let the researcher start fast (no browser) and escalate to Playwright only when needed.

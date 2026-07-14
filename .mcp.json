@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "playwright-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/bmatthews/Code/playwright-search/dist/mcp.js"
+      ],
+      "env": {}
+    }
+  }
+}

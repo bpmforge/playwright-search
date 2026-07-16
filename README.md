@@ -1,11 +1,15 @@
-# playwright-search
+# Quarry
 
-Multi-engine web search + page extraction. Free, polite, local. HTTP-first with Playwright fallback.
+**Agent-grade web retrieval.** Human-paced multi-engine search + zero-dep fetch→clean-markdown extraction. Self-hosted, free, polite, local — no third-party scraping API (no Firecrawl/Jina/Tavily dependency). HTTP-first with a Playwright fallback for JS-heavy/Cloudflare pages.
+
+A quarry is both what you hunt for and the raw material you extract and refine — this fetches the pages your agent is after and refines them to clean markdown. Companion to **Lodestone** (code retrieval); Quarry is retrieval over the open web.
 
 - Query → top-N results from DuckDuckGo, Brave, Bing (Google opt-in)
-- Each result URL → Mozilla Readability extraction → 24h disk cache
+- Each result URL → readable extraction → clean markdown → 24h disk cache
 - Paragraph-level relevance ranking (BM25-lite) — returns the BEST paragraphs matching your query
-- Three CLI/library/MCP entry points
+- Three entry points: library (`@bpmforge/quarry`), CLI (`quarry`), MCP (`quarry-mcp`)
+
+> **Naming / compatibility:** the product is **Quarry** (npm `@bpmforge/quarry`, repo `bpmforge/quarry`). The `bpm-pull` command and the `playwright-search` MCP server name remain as **aliases** so existing bpmforge integrations (expert system, amplifier) keep working unchanged.
 
 For consuming this from opencode, Claude Code, Jarvis, claude-experts, bpm-opencode-experts, etc. see [`INTEGRATION.md`](./INTEGRATION.md) and [`MCP.md`](./MCP.md).
 

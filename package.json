@@ -1,9 +1,12 @@
 {
-  "name": "playwright-search",
-  "version": "0.3.0",
-  "description": "Human-paced multi-engine search via Playwright (DDG, Brave, Bing, Google)",
+  "name": "@bpmforge/quarry",
+  "version": "0.4.0",
+  "description": "Quarry — agent-grade web retrieval: human-paced multi-engine search + zero-dep fetch→clean-markdown extraction, self-hosted, no third-party scraping API",
   "type": "module",
   "bin": {
+    "quarry": "./dist/cli.js",
+    "quarry-mcp": "./dist/mcp.js",
+    "bpm-pull": "./dist/cli.js",
     "playwright-search": "./dist/cli.js",
     "playwright-search-mcp": "./dist/mcp.js"
   },

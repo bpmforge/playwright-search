@@ -24,6 +24,34 @@ describe("parseRobots", () => {
     expect(r.disallow).toEqual([""]);
     expect(isAllowed(r, "/anything")).toBe(true);
   });
+
+  it("regression: another crawler's blanket block does not apply to us", () => {
+    // Wikipedia's shape: a hostile bot is blocked outright, everyone else is fine.
+    // Treating every group as active blocked the whole site for us.
+    const r = parseRobots(
+      `User-agent: MJ12bot\nDisallow: /\n\nUser-agent: *\nDisallow: /w/\n`,
+    );
+    expect(r.disallow).toEqual(["/w/"]);
+    expect(isAllowed(r, "/wiki/Okapi_BM25")).toBe(true);
+    expect(isAllowed(r, "/w/index.php")).toBe(false);
+  });
+
+  it("a group naming us overrides the wildcard group", () => {
+    const r = parseRobots(
+      `User-agent: *\nDisallow: /\n\nUser-agent: quarry\nDisallow: /private\n`,
+      "quarry",
+    );
+    expect(r.disallow).toEqual(["/private"]);
+    expect(isAllowed(r, "/anything")).toBe(true);
+    expect(isAllowed(r, "/private/x")).toBe(false);
+  });
+
+  it("consecutive User-agent lines share one rule group", () => {
+    const r = parseRobots(
+      `User-agent: badbot\nUser-agent: *\nDisallow: /shared\n`,
+    );
+    expect(r.disallow).toEqual(["/shared"]);
+  });
 });
 
 describe("isAllowed", () => {
@@ -50,5 +78,12 @@ describe("isAllowed", () => {
     const r = parseRobots(`User-agent: *\nDisallow: /*.pdf\n`);
     expect(isAllowed(r, "/foo/bar.pdf")).toBe(false);
     expect(isAllowed(r, "/foo/bar.html")).toBe(true);
+  });
+
+  it("honours the end-of-path anchor", () => {
+    const r = parseRobots(`User-agent: *\nDisallow: /*.pdf$\n`);
+    expect(isAllowed(r, "/doc/a.pdf")).toBe(false);
+    // Anchored rule must not match when the path continues past the suffix.
+    expect(isAllowed(r, "/doc/a.pdf.html")).toBe(true);
   });
 });

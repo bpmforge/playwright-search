@@ -8,15 +8,21 @@ const cache = new Map<string, RobotsRules>();
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export function parseRobots(text: string, ourUa = "*"): RobotsRules {
-  const rules: RobotsRules = { disallow: [], allow: [], fetchedAt: Date.now() };
-  let active = false;
-  let starActive = false;
-  let starRules: RobotsRules = {
+  const our = ourUa.toLowerCase();
+  const starRules: RobotsRules = {
     disallow: [],
     allow: [],
     fetchedAt: Date.now(),
   };
-  let uaRules: RobotsRules = { disallow: [], allow: [], fetchedAt: Date.now() };
+  const uaRules: RobotsRules = {
+    disallow: [],
+    allow: [],
+    fetchedAt: Date.now(),
+  };
+
+  // Consecutive User-agent lines share one group; the first rule line ends it.
+  let group: string[] = [];
+  let lastWasUa = false;
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/#.*$/, "").trim();
@@ -25,19 +31,33 @@ export function parseRobots(text: string, ourUa = "*"): RobotsRules {
     if (idx < 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();
     const val = line.slice(idx + 1).trim();
+
     if (key === "user-agent") {
-      const ua = val.toLowerCase();
-      active = ua === ourUa.toLowerCase() || ourUa === "*";
-      starActive = ua === "*";
-    } else if (key === "disallow") {
-      if (active) uaRules.disallow.push(val);
-      if (starActive) starRules.disallow.push(val);
-    } else if (key === "allow") {
-      if (active) uaRules.allow.push(val);
-      if (starActive) starRules.allow.push(val);
+      if (!lastWasUa) group = [];
+      group.push(val.toLowerCase());
+      lastWasUa = true;
+      continue;
+    }
+    if (key !== "disallow" && key !== "allow") continue;
+    lastWasUa = false;
+
+    // Only our own group and the wildcard group bind us. Rules addressed to other
+    // crawlers are not ours to obey — treating every group as active meant one
+    // "User-agent: MJ12bot / Disallow: /" line blocked the entire site for us
+    // (which is exactly what all of Wikipedia did).
+    const mine = our !== "*" && group.includes(our);
+    const star = group.includes("*");
+
+    if (key === "disallow") {
+      if (mine) uaRules.disallow.push(val);
+      if (star) starRules.disallow.push(val);
+    } else {
+      if (mine) uaRules.allow.push(val);
+      if (star) starRules.allow.push(val);
     }
   }
 
+  // A group naming us wins outright; otherwise fall back to the wildcard group.
   return uaRules.disallow.length > 0 || uaRules.allow.length > 0
     ? uaRules
     : starRules;
@@ -45,14 +65,18 @@ export function parseRobots(text: string, ourUa = "*"): RobotsRules {
 
 function pathMatches(rule: string, path: string): boolean {
   if (!rule) return false;
-  const escaped = rule
+  // A trailing "$" is an end-of-path anchor. It used to be escaped along with the
+  // other metacharacters, so "/*.pdf$" compiled to /^\/.*\.pdf\$/ and only matched
+  // paths containing a literal "$" — i.e. end-anchored rules never matched at all.
+  const endAnchored = rule.endsWith("$");
+  const body = endAnchored ? rule.slice(0, -1) : rule;
+  const escaped = body
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*");
-  const anchored = rule.endsWith("$") ? `^${escaped}` : `^${escaped}`;
   try {
-    return new RegExp(anchored).test(path);
+    return new RegExp(`^${escaped}${endAnchored ? "$" : ""}`).test(path);
   } catch {
-    return path.startsWith(rule);
+    return path.startsWith(body);
   }
 }
 

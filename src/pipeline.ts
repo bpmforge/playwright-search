@@ -4,7 +4,8 @@ import {
   type FetchOptions,
   type FetchResult,
 } from "./fetch/fetcher.js";
-import type { SearchResult, EngineId } from "./types.js";
+import type { EngineId } from "./types.js";
+import { fuseRuns } from "./fuse.js";
 
 export interface EnrichedResult {
   rank: number;
@@ -27,63 +28,6 @@ export interface ProgressEvent {
   current: number;
   total: number;
   message: string;
-}
-
-function dedupe(
-  runs: { engine: EngineId; results: SearchResult[] }[],
-): EnrichedResult[] {
-  const byUrl = new Map<string, EnrichedResult>();
-  let nextRank = 1;
-
-  for (const run of runs) {
-    for (const r of run.results) {
-      const key = normalizeUrl(r.url);
-      const existing = byUrl.get(key);
-      if (existing) {
-        if (!existing.engines.includes(r.engine))
-          existing.engines.push(r.engine);
-        if (r.snippet.length > existing.snippet.length)
-          existing.snippet = r.snippet;
-      } else {
-        byUrl.set(key, {
-          rank: nextRank++,
-          engines: [r.engine],
-          title: r.title,
-          url: r.url,
-          snippet: r.snippet,
-          fetched: {} as FetchResult,
-        });
-      }
-    }
-  }
-
-  const merged = Array.from(byUrl.values());
-  merged.sort((a, b) => b.engines.length - a.engines.length || a.rank - b.rank);
-  merged.forEach((m, i) => (m.rank = i + 1));
-  return merged;
-}
-
-function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    u.hash = "";
-    const stripParams = [
-      "utm_source",
-      "utm_medium",
-      "utm_campaign",
-      "utm_term",
-      "utm_content",
-      "fbclid",
-      "gclid",
-      "ref",
-    ];
-    for (const p of stripParams) u.searchParams.delete(p);
-    let s = u.toString();
-    if (s.endsWith("/")) s = s.slice(0, -1);
-    return s.toLowerCase();
-  } catch {
-    return url;
-  }
 }
 
 async function pool<T, R>(
@@ -131,10 +75,14 @@ export async function searchAndFetch(
     message: `${runs.filter((r) => r.ok).length}/${enginesCount} engines returned`,
   });
 
-  const okRuns = runs
-    .filter((r) => r.ok)
-    .map((r) => ({ engine: r.engine, results: r.results }));
-  const merged = dedupe(okRuns).slice(0, enrichTop);
+  const merged: EnrichedResult[] = fuseRuns(runs, enrichTop).map((f) => ({
+    rank: f.rank,
+    engines: f.engines,
+    title: f.title,
+    url: f.url,
+    snippet: f.snippet,
+    fetched: {} as FetchResult,
+  }));
 
   const totalFetches = merged.length;
   let fetchedCount = 0;

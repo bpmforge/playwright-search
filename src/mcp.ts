@@ -6,7 +6,8 @@ import { searchAndFetch, type EnrichedResult } from "./pipeline.js";
 import { fetchAndExtract } from "./fetch/fetcher.js";
 import { searchAll } from "./index.js";
 import { rankByQuery } from "./extract/rank.js";
-import { pullmdSearch, pullmdReadUrl, type SerpResult } from "./pullmd-serp.js";
+import { pullToMarkdown } from "./bpm-pull.js";
+import { fuseRuns, type FusedResult } from "./fuse.js";
 
 const DEFAULT_MAX_CHARS = 3000;
 const HARD_MAX_CHARS = 12000;
@@ -14,42 +15,29 @@ const HARD_MAX_CHARS = 12000;
 const ENGINES = ["ddg", "brave", "bing", "google"] as const;
 type EngineId = (typeof ENGINES)[number];
 
-// SERP with graceful fallback. First try the fast no-browser path (pullmdSearch =
-// bpm-pull plain fetch of engine result pages). Many engines block plain fetch
-// (Cloudflare / JS-only) and return nothing — that was the external pullmd service's
-// job. So when the fast path is empty, fall back to the native Playwright multi-engine
-// search (searchAll), which drives a real browser. This is what lets us drop the
-// external pullmd dependency without losing SERP coverage. Content fetch keeps its own
-// pullmd->playwright fallback in the handlers below.
-async function serpWithFallback(
+/**
+ * Engines used for SERP. Google is excluded on purpose: its HTTP path parses 0
+ * results and its browser fallback is skipped on challenge, so including it only
+ * bought a per-search timeout.
+ */
+const SERP_ENGINES: EngineId[] = ["ddg", "brave", "bing"];
+
+/**
+ * The SERP path. `searchAll`'s adapters are already HTTP-first (jsdom parse, 12s
+ * timeout, block detection, redirect decoding) and only launch a browser when the
+ * HTTP attempt fails — so this IS the fast path. A second hand-rolled markdown-parsing
+ * SERP layer used to run in front of it; it returned 0 results and has been removed.
+ */
+async function serpSearch(
   query: string,
   limit: number,
-): Promise<SerpResult[]> {
-  const fast = await pullmdSearch(query, limit);
-  if (fast.length > 0) return fast;
-  const runs = await searchAll(query, { engines: [...ENGINES] as EngineId[] });
-  const merged = new Map<string, SerpResult>();
-  for (const run of runs) {
-    if (!run.ok) continue;
-    for (const r of run.results) {
-      const key = normalizeUrl(r.url);
-      const existing = merged.get(key);
-      if (existing) {
-        if (!existing.engines.includes(r.engine))
-          existing.engines.push(r.engine);
-        if (r.snippet.length > existing.snippet.length)
-          existing.snippet = r.snippet;
-      } else {
-        merged.set(key, {
-          title: r.title,
-          url: r.url,
-          snippet: r.snippet,
-          engines: [r.engine],
-        });
-      }
-    }
-  }
-  return [...merged.values()].slice(0, limit);
+): Promise<FusedResult[]> {
+  const runs = await searchAll(query, {
+    engines: SERP_ENGINES,
+    top: Math.max(limit, 10),
+    headless: true,
+  });
+  return fuseRuns(runs, limit);
 }
 
 function formatEnrichedAsText(
@@ -231,42 +219,7 @@ server.registerTool(
       headless,
     });
 
-    const seen = new Set<string>();
-    const merged: {
-      rank: number;
-      engines: EngineId[];
-      title: string;
-      url: string;
-      snippet: string;
-    }[] = [];
-    let rank = 0;
-    for (const run of runs) {
-      if (!run.ok) continue;
-      for (const r of run.results) {
-        const key = normalizeUrl(r.url);
-        const existing = merged.find((m) => normalizeUrl(m.url) === key);
-        if (existing) {
-          if (!existing.engines.includes(r.engine))
-            existing.engines.push(r.engine);
-          if (r.snippet.length > existing.snippet.length)
-            existing.snippet = r.snippet;
-        } else {
-          if (seen.has(key)) continue;
-          seen.add(key);
-          merged.push({
-            rank: ++rank,
-            engines: [r.engine],
-            title: r.title,
-            url: r.url,
-            snippet: r.snippet,
-          });
-        }
-      }
-    }
-
-    const top = merged
-      .sort((a, b) => b.engines.length - a.engines.length)
-      .slice(0, limit);
+    const top = fuseRuns(runs, limit);
     const lines: string[] = [];
     top.forEach((r, i) => {
       lines.push(`${i + 1}. ${r.title}`);
@@ -378,10 +331,10 @@ server.registerTool(
     title: "Web search (multi-engine SERP, fast path + browser fallback)",
     description:
       "Step 1 — always start here for any new topic. " +
-      "Tries a fast no-browser fetch of DDG/Mojeek/Brave/Startpage result pages first (our own " +
-      "zero-dep pull, no external service); when an engine blocks plain fetch it falls back to " +
-      "the native Playwright multi-engine search automatically. " +
-      "Deduplicates and ranks by engine-agreement. Returns titles, URLs, and snippets. " +
+      "Queries DDG, Brave, and Bing over plain HTTP (no browser), falling back to a real " +
+      "browser per-engine only when the HTTP attempt is blocked. " +
+      "Deduplicates and ranks by Reciprocal Rank Fusion, so results several engines agree on " +
+      "rise above single-engine hits. Returns titles, URLs, and snippets. " +
       "Use before web_research_pullmd to triage which URLs are worth fetching.",
     inputSchema: {
       query: z.string().describe("The search query"),
@@ -395,7 +348,7 @@ server.registerTool(
     },
   },
   async ({ query, limit }) => {
-    const results = await serpWithFallback(query, limit);
+    const results = await serpSearch(query, limit);
     if (results.length === 0) {
       return { content: [{ type: "text", text: "No results found." }] };
     }
@@ -416,7 +369,7 @@ server.registerTool(
     title: "Web research (SERP + full-page fetch + BM25)",
     description:
       "Step 2 — full content after web_search_pullmd has identified candidate URLs. " +
-      "SERP (fast fetch, browser fallback) + full-page fetch via our own zero-dep pull + BM25 " +
+      "Rank-fused multi-engine SERP + full-page fetch via our own zero-dep pull + BM25 " +
       "paragraph ranking. Automatically falls back to Playwright (fetchAndExtract) for any URL " +
       "where the fast pull returns < 500 chars (JS-heavy SPAs, auth walls, Cloudflare). " +
       "Each source annotated 'fetch: pull' or 'fetch: playwright fallback'. " +
@@ -451,7 +404,7 @@ server.registerTool(
     const rankQuery = relevance_query || query;
     const PULLMD_MIN_CHARS = 500;
 
-    const serpResults = await serpWithFallback(query, top * 3);
+    const serpResults = await serpSearch(query, top * 3);
     const candidates = serpResults.slice(0, top);
 
     if (candidates.length === 0) {
@@ -462,7 +415,7 @@ server.registerTool(
     const pullmdFetches = await Promise.allSettled(
       candidates.map(async (r) => ({
         result: r,
-        md: await pullmdReadUrl(r.url),
+        md: await pullToMarkdown(r.url),
       })),
     );
 
@@ -522,29 +475,6 @@ server.registerTool(
     };
   },
 );
-
-function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    u.hash = "";
-    for (const p of [
-      "utm_source",
-      "utm_medium",
-      "utm_campaign",
-      "utm_term",
-      "utm_content",
-      "fbclid",
-      "gclid",
-    ]) {
-      u.searchParams.delete(p);
-    }
-    let s = u.toString();
-    if (s.endsWith("/")) s = s.slice(0, -1);
-    return s.toLowerCase();
-  } catch {
-    return url;
-  }
-}
 
 async function main() {
   const transport = new StdioServerTransport();

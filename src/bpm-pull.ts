@@ -1,14 +1,17 @@
 // bpm-pull.ts — SELF-CONTAINED url -> clean markdown. Zero deps.
 //
 // Vendored from bpm-agent-amplifier/scripts/bpm-pull.mjs (our own fetch->extract->markdown
-// method) to REPLACE the external pullmd Docker service (AeternaLabsHQ, localhost:33000) that
-// pullmd-serp.ts previously depended on. Pipeline: fetch -> strip boilerplate -> density-scored
-// main-content extraction -> own HTML->MD. Zero external services, zero npm deps.
+// method) to REPLACE the external pullmd Docker service (AeternaLabsHQ, localhost:33000).
+// Pipeline: fetch -> strip boilerplate -> density-scored main-content extraction -> own
+// HTML->MD. Zero external services, zero npm deps.
+//
+// This is the CONTENT fetcher only. SERP parsing lives in engines/http-configs.ts (jsdom over
+// real HTML); a second markdown-parsing SERP layer that sat here was removed — it returned 0
+// results because inline() dropped protocol-relative hrefs.
 //
 // Known limitation (same as the source): JS-rendered SPAs and Cloudflare-challenged pages return
 // thin content — callers must fall back to the Playwright fetcher (fetchAndExtract) for those.
-// pullmd-serp.ts's pullmdReadUrl() returns "" on failure so multi-engine SERP + the content path's
-// existing Playwright fallback degrade gracefully rather than throwing.
+// pullToMarkdown() returns "" on failure so those callers degrade rather than throwing.
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
@@ -172,7 +175,12 @@ export function inline(s: string): string {
     s
       .replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, h, t) => {
         const text = t.replace(/<[^>]+>/g, "").trim();
-        return text && h.startsWith("http") ? `[${text}](${h})` : text;
+        if (!text) return text;
+        // Protocol-relative hrefs (//host/path) are links too — the old
+        // startsWith("http") guard silently flattened them to plain text, which
+        // dropped every outbound link on pages that use them (DDG's SERP is 50/51).
+        const href = h.startsWith("//") ? `https:${h}` : h;
+        return href.startsWith("http") ? `[${text}](${href})` : text;
       })
       .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
       .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
@@ -234,7 +242,7 @@ export function toMarkdown(html: string): string {
 }
 
 // The public entry point: url -> clean markdown via our own pull. `raw` skips main-content
-// extraction (used for SERP result pages, where every result link must be preserved).
+// extraction, keeping every link on the page.
 export async function pull(
   url: string,
   opts: { raw?: boolean } = {},
@@ -243,4 +251,20 @@ export async function pull(
   const charset = sniffCharset(buf, contentType);
   const html = stripBoilerplate(decodeBody(buf, charset));
   return toMarkdown(opts.raw ? html : extractMain(html));
+}
+
+/**
+ * `pull` that degrades to "" instead of throwing. Callers treat empty as "thin
+ * content" and fall back to the Playwright fetcher, so a Cloudflare-blocked or
+ * JS-only page becomes a fallback rather than a hard failure.
+ */
+export async function pullToMarkdown(
+  url: string,
+  opts: { raw?: boolean } = {},
+): Promise<string> {
+  try {
+    return await pull(url, opts);
+  } catch {
+    return "";
+  }
 }

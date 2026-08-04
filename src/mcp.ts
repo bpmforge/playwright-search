@@ -7,6 +7,7 @@ import { fetchAndExtract } from "./fetch/fetcher.js";
 import { searchAll } from "./index.js";
 import { rankByQuery } from "./extract/rank.js";
 import { pullToMarkdown } from "./bpm-pull.js";
+import { findAdapter } from "./sources/index.js";
 import { fuseRuns, type FusedResult } from "./fuse.js";
 
 const DEFAULT_MAX_CHARS = 3000;
@@ -55,7 +56,7 @@ function formatEnrichedAsText(
         : r.fetched.extract?.paywalled
           ? "paywalled"
           : r.fetched.extract
-            ? `${r.fetched.extract.textContent.length} chars`
+            ? `${r.fetched.extract.textContent.length} chars${r.fetched.source ? ` via ${r.fetched.source} api` : ""}`
             : `no extract (status ${r.fetched.status})`;
 
     out.push(
@@ -411,16 +412,18 @@ server.registerTool(
       return { content: [{ type: "text", text: "No results found." }] };
     }
 
-    // Fetch all candidates via our own pull in parallel
+    // Fetch all candidates via our own pull in parallel. URLs with a source adapter
+    // skip it deliberately: the site's API beats anything scraped off the page, so we
+    // let them fall through to fetchAndExtract, which routes through the adapter.
     const pullmdFetches = await Promise.allSettled(
       candidates.map(async (r) => ({
         result: r,
-        md: await pullToMarkdown(r.url),
+        md: findAdapter(r.url) ? "" : await pullToMarkdown(r.url),
       })),
     );
 
-    // For any URL where pullmd returned thin content, retry with playwright
-    const playwrightRetries = await Promise.allSettled(
+    // Anything the fast pull left thin (or skipped) goes through the full fetch path.
+    const richRetries = await Promise.allSettled(
       pullmdFetches.map(async (f) => {
         if (f.status !== "fulfilled") return null;
         if (f.value.md.length >= PULLMD_MIN_CHARS) return null;
@@ -436,18 +439,18 @@ server.registerTool(
       const { result, md } = f.value;
       sourceNum++;
 
-      // Prefer playwright content if the fast pull was thin
-      const retry = playwrightRetries[i];
-      const playwrightText =
-        retry?.status === "fulfilled" &&
-        retry.value?.extract?.extract?.textContent
-          ? retry.value.extract.extract.textContent
-          : null;
-      const fetchNote = playwrightText
-        ? "playwright fallback"
-        : md.length >= PULLMD_MIN_CHARS
-          ? "pull"
-          : "snippet only";
+      // Prefer the full-fetch content if the fast pull was thin or was skipped.
+      const retry = richRetries[i];
+      const retryResult =
+        retry?.status === "fulfilled" ? (retry.value?.extract ?? null) : null;
+      const playwrightText = retryResult?.extract?.textContent ?? null;
+      const fetchNote = retryResult?.source
+        ? `${retryResult.source} api`
+        : playwrightText
+          ? "direct fetch"
+          : md.length >= PULLMD_MIN_CHARS
+            ? "pull"
+            : "snippet only";
 
       out.push(
         `[Source ${sourceNum}: ${result.title || "(untitled)"} — ${hostname(result.url)} — ${result.url}]`,

@@ -1,6 +1,7 @@
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { detectPaywall } from "./paywall.js";
+import { toMarkdown } from "../bpm-pull.js";
 
 export interface Extracted {
   title: string;
@@ -40,11 +41,20 @@ export function extract(html: string, url: string): Extracted | null {
 
   if (!parsed) return null;
 
-  const textContent = (parsed.textContent ?? "")
-    .replace(/\s+\n/g, "\n")
+  const contentHtml = parsed.content ?? "";
+
+  // Readability's own textContent flattens every block element into one run, and the
+  // cleanup below only collapses newlines that already exist — it never inserts any.
+  // The result was a single "paragraph" for every page, which made rankByQuery skip
+  // relevance selection entirely and just head-truncate. Deriving the text from the
+  // article HTML keeps paragraph boundaries, which is what BM25 ranks over.
+  const blockText = contentHtml ? toMarkdown(contentHtml) : "";
+  const textContent = (blockText || parsed.textContent || "")
+    // Trailing horizontal whitespace only. The previous `\s+\n` also ate the newline
+    // *before* a blank line, collapsing every paragraph break it was meant to tidy.
+    .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  const contentHtml = parsed.content ?? "";
   const textLength = textContent.length;
 
   const paywalled = detectPaywall({

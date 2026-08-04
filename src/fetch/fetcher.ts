@@ -13,6 +13,7 @@ import {
   type CachedExtract,
 } from "./cache.js";
 import { extract } from "../extract/readability.js";
+import { fetchFromSource } from "../sources/index.js";
 
 const REAL_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -23,6 +24,8 @@ export interface FetchOptions {
   useCache?: boolean;
   ttlMs?: number;
   retries?: number;
+  /** Set false to force the generic scrape path even where an adapter exists. */
+  useSources?: boolean;
 }
 
 export interface FetchResult {
@@ -36,6 +39,8 @@ export interface FetchResult {
   extract: CachedExtract | null;
   skipped?: "blacklisted" | "robots" | "non-html" | "blocked";
   error?: string;
+  /** Adapter id when the content came from a site API rather than scraped HTML. */
+  source?: string;
 }
 
 const HTML_CT = /^text\/html|^application\/xhtml\+xml/i;
@@ -50,6 +55,7 @@ export async function fetchAndExtract(
     useCache = true,
     ttlMs,
     retries = 1,
+    useSources = true,
   } = opts;
 
   const host = hostnameOf(url);
@@ -79,6 +85,50 @@ export async function fetchAndExtract(
       finalUrl: url,
       status: 0,
     });
+  }
+
+  // Prefer a site's own API over scraping it. Returns null when no adapter matches or
+  // the API declines, in which case we fall through to the generic path below.
+  // robots.txt governs crawling the HTML site; a documented public API is a separate,
+  // sanctioned interface, so it is not gated on that check.
+  if (useSources) {
+    const viaSource = await fetchFromSource(url, timeoutMs);
+    if (viaSource) {
+      const { adapter, doc } = viaSource;
+      const fetchedAt = new Date().toISOString();
+      const extractData: CachedExtract = {
+        title: doc.title,
+        byline: doc.byline,
+        siteName: doc.siteName,
+        excerpt: doc.excerpt,
+        textContent: doc.textContent,
+        contentHtml: doc.contentHtml,
+        paywalled: false,
+      };
+      const fetchData: CachedFetch = {
+        url,
+        finalUrl: doc.canonicalUrl,
+        status: 200,
+        contentType: "application/json",
+        html: doc.contentHtml,
+        fetchedAt,
+      };
+      if (useCache) {
+        cacheWrite(url, { fetch: fetchData, extract: extractData }, ttlMs);
+      }
+      recordSuccess(host);
+      return {
+        url,
+        finalUrl: doc.canonicalUrl,
+        status: 200,
+        contentType: "application/json",
+        fetchedAt,
+        cached: false,
+        fetch: fetchData,
+        extract: extractData,
+        source: adapter,
+      };
+    }
   }
 
   if (respectRobots) {
